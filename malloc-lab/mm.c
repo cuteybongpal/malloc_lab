@@ -50,7 +50,10 @@ int* getfrontheader(int* header);
 void* extendheap(int size);
 void* mergeFreeBlock(int* header);
 int max(int a, int b);
+void* connectFreeBlock(int* header);
 size_t getsize(int* header);
+int* getnextfreeblock(int* header);
+void disconnectfreeblock(int* header);
 /*
  * mm_init - initialize the malloc package.
  */
@@ -89,27 +92,23 @@ int mm_init(void)
 int* find_fit(size_t size)
 {
     int* curheader = (int*)start;
+    
+    if (isallocated(curheader))
+        return NULL;
+    while (isallocated(curheader))
+    {
+        curheader = getnextheader(curheader);
+    }
     while (1)
     {
-        int block_size = getsize(curheader);
-        int isallocate = isallocated(curheader);
-        if (isallocate == 1)
-        {
-            if (block_size == 0)
-                return NULL;
-            curheader = getnextheader(curheader);
-            continue;
-        }
+        if (curheader == NULL)
+            return NULL;
+        size_t fsize = getsize(curheader);
 
-        if (block_size >= size)
+        if (fsize >= size)
             return curheader;
-        else
-        {
-            curheader = getnextheader(curheader);
-            continue;
-        }
+        curheader = getnextfreeblock(curheader);
     }
-    return NULL;
 }
 /*
  * mm_malloc - Allocate a block by incrementing the brk pointer.
@@ -117,7 +116,7 @@ int* find_fit(size_t size)
  */
 //이거도 수정이 필요해보임
 void *mm_malloc(size_t size)
-{;
+{
     // int newsize = ALIGN(size + SIZE_T_SIZE);
     // void *p = mem_sbrk(newsize);
     // if (p == (void *)-1)
@@ -137,15 +136,17 @@ void *mm_malloc(size_t size)
         //공간 새로 할당 받기
         fit = extendheap(newsize);
     }
-    //요청한 사이즈와 받은 사이즈가 같은면 해당 블럭의 헤더와 푸터를 수정해서, 할당중으로 바꾼다.
+    //받은 블럭의 크기가 요청한 블럭의 8바이트만큼만 클때는 그냥 바로 사용해주기
+    //왜냐하면 명시적으로 구현하려면 가용블럭의 최소 크기는 16바이트가 되기 때문임 헤더 + prev + next + 푸터
     int origin_size = getsize(fit);
-    if (origin_size == newsize)
+    if (origin_size - newsize <= 8)
     {
         updateheader(fit, origin_size, 1);
         char* footer = (char*)getnextheader(fit);
         footer -= 4;
         updateheader((int*)footer, origin_size, 1);
         char* ptr = (char*)fit;
+        disconnectfreeblock(fit);
         return (void*)(ptr + 4);
     }
     //만약 요청한 사이즈와 사이즈가 같지 않다면
@@ -163,6 +164,8 @@ void *mm_malloc(size_t size)
         char* f = (char*)getnextheader((int*)h);
         f -= 4;
         updateheader((int*)f, origin_size - newsize, 0);
+        disconnectfreeblock(fit);
+        connectFreeBlock((int*)h);
         char* ptr = (char*)fit;
         return (void*)(ptr + 4);
     }
@@ -178,9 +181,9 @@ void mm_free(void *ptr)
     updateheader((int*)header, getsize((int*)header), 0);
     char* footer = (char*)getnextheader((int*)header);
     footer -= 4;
-    updateheader((int*)header, getsize((int*)header), 0);
-    //병합
-    mergeFreeBlock((int*)header);
+    updateheader((int*)footer , getsize((int*)header), 0);
+    //가용 블럭끼리 연결
+    connectFreeBlock((int*)header);
 }
 
 /*
@@ -237,6 +240,34 @@ size_t getsize(int* header)
     size_t size = (*header) & ~0x7;
     return size;
 }
+size_t getpreddist(int* header)
+{
+    char* pred = (char*)header;
+    pred += 4;
+    return *((int*)pred);
+}
+
+size_t getnextdist(int* header)
+{
+    char* next = (char*)header;
+    next += 8;
+    return *((int*)next);
+}
+void updatepred(int* header, int size)
+{
+    //전 가용 리스트까지의 거리를 update해줌
+    char* h = (char*)header;
+    h += 4;
+    *((int*)h) = size;
+}
+
+void updatesucc(int* header, int size)
+{
+    //전 가용 리스트까지의 거리를 update해줌
+    char* h = (char*)header;
+    h += 8;
+    *((int*)h) = size;
+}
 
 void updateheader(int* header, int size, int isallocated)
 {
@@ -250,7 +281,7 @@ void* extendheap(int word)
     char* header = mem_sbrk(word);
     if (header == (void*)-1)
     {
-        return;
+        return NULL;
     }
     header -= 4;
     //가용 상태의 블럭을 만들어줌
@@ -259,8 +290,9 @@ void* extendheap(int word)
     updateheader((int*)(footer - 4), word, 0);
 
     updateheader((int*)footer, 0, 1);
-    //todo : 가용 상태의 블럭을 합쳐주기!
-    return mergeFreeBlock((int*)header);
+    //todo 1: 가용 상태의 블럭을 합쳐주기!
+    
+    return connectFreeBlock((int*)header);
 }
 
 int max(int a, int b)
@@ -289,6 +321,10 @@ void* mergeFreeBlock(int* header)
         char* footer = (char*)getnextheader(frontheader);
         footer -= 4;
         updateheader((int*)footer, newsize, 0);
+        if (getnextdist(backheader))
+            updatesucc(frontheader, getnextdist(frontheader)+getnextdist(header)+getnextdist(backheader));
+        else
+            updatesucc(frontheader, 0);
         return frontheader;
     }
     //case 2
@@ -300,6 +336,11 @@ void* mergeFreeBlock(int* header)
         char* footer = (char*)getnextheader(frontheader);
         footer -= 4;
         updateheader((int*)footer, newsize, 0);
+
+        if (getnextdist(header))
+            updatesucc(frontheader, getnextdist(frontheader)+getnextdist(header));
+        else
+            updatesucc(frontheader, 0);
         return frontheader;
     }
 
@@ -310,7 +351,110 @@ void* mergeFreeBlock(int* header)
         char* footer = (char*)getnextheader(header);
         footer -= 4;
         updateheader((int*)footer, newsize, 0);
+
+        if (getnextdist(backheader))
+            updatesucc(header, getnextdist(backheader)+getnextdist(header));
+        else
+            updatesucc(header, 0);
         return backheader;
     }
     return header;
+}
+//헤더에는 무조건 가용 블럭이 들어가야 함.
+int* getnextfreeblock(int* header)
+{
+    size_t size = getnextdist(header);
+    if (size == 0)
+        return NULL;
+    char* succ = (char*)header;
+    succ += size;
+    return (int*)succ;
+}
+int* getprevfreeblock(int* header)
+{
+    size_t size = getpreddist(header);
+    if (size == 0)
+        return NULL;
+    char* succ = (char*)header;
+    succ -= size;
+    return (int*)succ;
+}
+
+void* connectFreeBlock(int* header)
+{
+    header = (int*)mergeFreeBlock(header);
+    //왼쪽부터 연결
+    int leftsize = 0;
+    int* curheader = getfrontheader(header);
+    int flag = 0;
+    //프롤로그 블럭이면 반복 금지
+    while (getsize(curheader) != 8)
+    {
+        leftsize += getsize(curheader);
+        if (isallocated(curheader))
+        {
+            curheader = getfrontheader(curheader);
+            continue;
+        }    
+        flag = 1;
+        break;
+    }
+    //왼쪽에 가용 공간이 있으면 연결 시켜주기
+    if (flag)
+    {
+        updatepred(header, leftsize);
+        updatesucc(curheader, leftsize);
+    }
+    else
+    {
+        updatepred(header, 0);
+
+    }
+
+    int rightsize = getsize(header);
+    curheader = getnextheader(header);
+    flag = 0;
+
+    while (getsize(curheader) != 0)
+    {
+        rightsize += getsize(curheader);
+        if (isallocated(curheader))
+        {
+            curheader = getnextheader(curheader);
+            continue; 
+        }
+        flag = 1;
+        break;
+    }
+    if (flag)
+    {
+        updatesucc(header, rightsize);
+        updatepred(curheader, rightsize);
+    }
+    else
+        updatesucc(header, 0);
+    return header;
+}
+
+void disconnectfreeblock(int* header)
+{
+    int* prev = getprevfreeblock(header);
+    int* next = getnextfreeblock(header);
+    if (prev == NULL && next == NULL)
+        return;
+
+    if (next == NULL)
+    {
+        updatesucc(prev, 0);
+    }
+    else if (prev == NULL)
+    {
+        updatepred(next, 0);
+    }
+    else
+    {
+        updatesucc(prev, getnextdist(header)+getnextdist(prev));
+        updatepred(next, getpreddist(header)+getpreddist(next));    
+    }    
+    
 }
